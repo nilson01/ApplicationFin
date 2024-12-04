@@ -27,15 +27,14 @@ from sklearn.preprocessing import OneHotEncoder
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.model_selection import train_test_split
 
+
+
 import rpy2.robjects as ro
 from rpy2.robjects import numpy2ri
-
-
-# # Activate NumPy to R conversion
-# numpy2ri.activate()
-
-# # Load the R script to avoid dynamic loading
-# ro.r.source("ACWL_tao.R")
+# Activate NumPy to R conversion
+numpy2ri.activate()
+# Load the R script to avoid dynamic loading
+ro.r.source("ACWL_tao.R")
 
 
 # Set the device
@@ -49,7 +48,6 @@ def load_config(file_path='config.yaml'):
     
 
 def extract_unique_treatment_values(df, columns_to_process, name): 
-    
     
     unique_values = {}
 
@@ -424,9 +422,8 @@ def initialize_nn(params, stage):
     return nn
 
 
-
 def batches(N, batch_size, seed=0):
-    # Set the seed for PyTorch random number generator for reproducibility
+    # Set the seed for reproducibility
     # torch.manual_seed(seed)
     
     # Create a tensor of indices from 0 to N-1
@@ -437,8 +434,32 @@ def batches(N, batch_size, seed=0):
     
     # Yield batches of indices
     for start_idx in range(0, N, batch_size):
-        batch_indices = indices[start_idx:start_idx + batch_size]
+        end_idx = min(start_idx + batch_size, N)
+        batch_indices = indices[start_idx:end_idx]
+        
+        # Skip batch if it has only one sample
+        if len(batch_indices) == 1 and start_idx > 0:
+            # Merge it with the previous batch by extending its indices
+            prev_batch_indices = indices[max(0, start_idx - batch_size):start_idx]
+            batch_indices = torch.cat((prev_batch_indices, batch_indices))
         yield batch_indices
+
+
+
+# def batches(N, batch_size, seed=0):
+#     # Set the seed for PyTorch random number generator for reproducibility
+#     # torch.manual_seed(seed)
+    
+#     # Create a tensor of indices from 0 to N-1
+#     indices = torch.arange(N)
+    
+#     # Shuffle the indices
+#     indices = indices[torch.randperm(N)]
+    
+#     # Yield batches of indices
+#     for start_idx in range(0, N, batch_size):
+#         batch_indices = indices[start_idx:start_idx + batch_size]
+#         yield batch_indices
 
 # The Identity class acts as a no-operation (no-op) activation function.
 #  It simply returns the input it receives without any modification. 
@@ -917,7 +938,9 @@ def initialize_optimizer_and_scheduler(nn_stage1, nn_stage2, params):
 
     # Select optimizer based on params
     if params['optimizer_type'] == 'adam':
-        optimizer = optim.Adam(combined_params, lr=params['optimizer_lr'])
+        # optimizer = optim.Adam(combined_params, lr=params['optimizer_lr']) 
+        optimizer = optim.AdamW(combined_params, lr=params['optimizer_lr'], weight_decay=params.get('optimizer_weight_decay', 0.01))
+
     elif params['optimizer_type'] == 'rmsprop':
         optimizer = optim.RMSprop(combined_params, lr=params['optimizer_lr'], weight_decay=params['optimizer_weight_decay'])
     else:
@@ -981,6 +1004,13 @@ def process_batches_DQL(model, inputs, actions, targets, params, optimizer, is_t
                         
             batch_idx = batch_idx.to(device)
             inputs_batch = torch.index_select(inputs, 0, batch_idx).to(device)
+
+
+            # correctness check: Ensure batch size meets the minimum requirement
+            if inputs_batch.size(0) < 2:  # Minimum batch size of 2 for BatchNorm or similar layers
+                print(f"Skipping batch due to insufficient size: {inputs_batch.size(0)}")
+                continue
+
             actions_batch = torch.index_select(actions, 0, batch_idx).to(device)
             targets_batch = torch.index_select(targets, 0, batch_idx).to(device)
             combined_inputs = torch.cat((inputs_batch, actions_batch.unsqueeze(-1)), dim=1)
@@ -1211,6 +1241,9 @@ def train_and_validate_W_estimator(config_number, model, optimizer, scheduler, t
 
         # Update the scheduler with the current epoch's validation loss
         update_scheduler(scheduler, params, val_loss)
+
+        # Print epoch summary
+        print(f"Estimation: Epoch [{epoch+1}/{params['n_epoch']}], Training Loss: {train_loss}, Validation Loss: {val_loss}")
 
 
     # Define file paths for saving models
@@ -1467,7 +1500,8 @@ def calculate_policy_values_W_estimator(train_tens, params, A1, A2, P_A1_given_H
 
     # Swap training/validation with testing, then test becomes train_val
     result2 = train_and_evaluate(test_data, val_data, train_data, params, config_number, resNum = 2)
-    
+    # result2 = result1
+
     print("calculate_policy_values_W_estimator: ", result1, result2)
     
     return (result1+result2)/2
@@ -1578,6 +1612,7 @@ def evaluate_method_DS(method_name, params, config_number, df, test_input_stage1
         'hidden_dim_stage1': tmp[1], #initial_config['hidden_dim_stage1'],
         'hidden_dim_stage2': tmp[2], #initial_config['hidden_dim_stage2']
         'activation_function': tmp[3], #initial_config['activation_function'], #'elu', 'relu', 'sigmoid', 'tanh', 'leakyrelu', 'none' 
+        'add_ll_batch_norm': tmp[4],
     }) 
         
     if params["f_model"]!="DQlearning":
@@ -1833,9 +1868,22 @@ def load_and_preprocess_data(params, replication_seed, config_seed, run='train')
     P_A2_given_H2_tensor = torch.gather(pi_tensor_stack, dim=0, index=A2_indices).squeeze(0)  # Remove the added dimension after gathering
 
 
-    #here is where I determine which indices to delete
-    indices1 = torch.nonzero(P_A1_given_H1_tensor < 0.10)
-    indices2 = torch.nonzero(P_A2_given_H2_tensor < 0.10)
+    # determine which indices to delete
+    # indices1 = torch.nonzero(P_A1_given_H1_tensor < 0.05)
+    # indices2 = torch.nonzero(P_A2_given_H2_tensor < 0.05)
+
+    # indices1 = torch.nonzero(P_A1_given_H1_tensor < 0.10)
+    # indices2 = torch.nonzero(P_A2_given_H2_tensor < 0.10)
+
+    indices1 = torch.nonzero(P_A1_given_H1_tensor < 0.15)
+    indices2 = torch.nonzero(P_A2_given_H2_tensor < 0.15)
+
+    # indices1 = torch.nonzero(P_A1_given_H1_tensor < 0.2)
+    # indices2 = torch.nonzero(P_A2_given_H2_tensor < 0.2)
+
+    # indices1 = torch.nonzero(P_A1_given_H1_tensor < 0.3)
+    # indices2 = torch.nonzero(P_A2_given_H2_tensor < 0.3)
+
     combined_indices_set = set(tuple(idx.tolist()) for idx in torch.cat((indices1, indices2)))
     combined_indices_tensor = torch.tensor(list(combined_indices_set))
     print("number of deletes", len(combined_indices_tensor))
@@ -1956,8 +2004,9 @@ def load_and_preprocess_data(params, replication_seed, config_seed, run='train')
     Ci = Ci[train_patient_ids]
 
     input_stage1 = O1_filtered.t()
+    print()
     params['input_dim_stage1'] = input_stage1.shape[1] #  (H_1)  
-    print("dimesnions of input stage", len(input_stage1))
+    print("Dimension of input stage 1: ", len(input_stage1))
     input_stage2 = torch.cat([O1_filtered.t(), A1_filtered.unsqueeze(1), Y1_filtered.unsqueeze(1), O2_filtered.t()], dim=1)         
     params['input_dim_stage2'] = input_stage2.shape[1] # (H_2)
 
@@ -2006,12 +2055,6 @@ def surr_opt(tuple_train, tuple_val, params, config_number, ensemble_num, option
         val_loss = process_batches(nn_stage1, nn_stage2, val_data, params, optimizer, option_sur=option_sur, is_train=False)
         val_losses.append(val_loss)
 
-        # train_loss = process_batches(nn_stage1, nn_stage2, train_data, params, optimizer, is_train=True)
-        # train_losses.append(train_loss)
-
-        # val_loss = process_batches(nn_stage1, nn_stage2, val_data, params, optimizer, is_train=False)
-        # val_losses.append(val_loss)
-
         if val_loss < best_val_loss:
             epoch_num_model = epoch
             best_val_loss = val_loss
@@ -2020,6 +2063,10 @@ def surr_opt(tuple_train, tuple_val, params, config_number, ensemble_num, option
 
         # Update the scheduler with the current epoch's validation loss
         update_scheduler(scheduler, params, val_loss)
+
+        # Print epoch summary
+        print(f"Training: Epoch [{epoch+1}/{params['n_epoch']}], Training Loss: {train_loss}, Validation Loss: {val_loss}")
+
 
     model_dir = f"models/{params['job_id']}"
     # Check if the directory exists, if not, create it
@@ -2282,20 +2329,25 @@ def simulations(V_replications, params, config_fixed, config_number):
     
     # Clone the fixed config for DQlearning and surr_opt to load the correct trained model 
     if params['trainingFixed']:
-        tmp = [params['num_layers'], params['hidden_dim_stage1'], params['hidden_dim_stage2'], params['activation_function'] ]
+        tmp = [params['num_layers'], params['hidden_dim_stage1'], params['hidden_dim_stage2'], params['activation_function'], params['add_ll_batch_norm']  ]
+
+        tmp_dql = [params["dql_params"]['num_layers'], params["dql_params"]['hidden_dim_stage1'], params["dql_params"]['hidden_dim_stage2'], params["dql_params"]['activation_function'], params["dql_params"]['add_ll_batch_norm']  ]
         # print(f"<<<<<<<<<<<<<--------------  {tmp} --------------->>>>>>>>>>>>>>>>>")
         params['num_layers'] = config_fixed['num_layers'] 
         params['hidden_dim_stage1'] = config_fixed['hidden_dim_stage1'] 
         params['hidden_dim_stage2'] = config_fixed['hidden_dim_stage2'] 
         params['activation_function'] = config_fixed['activation_function'] 
+        params['add_ll_batch_norm'] = config_fixed['add_ll_batch_norm'] 
 
     else:         
-        tmp = [config_fixed['num_layers'], config_fixed['hidden_dim_stage1'], config_fixed['hidden_dim_stage2'], config_fixed['activation_function'] ]
+        tmp = [config_fixed['num_layers'], config_fixed['hidden_dim_stage1'], config_fixed['hidden_dim_stage2'], config_fixed['activation_function'], config_fixed['add_ll_batch_norm'] ]
+        tmp_dql = [config_fixed["dql_params"]['num_layers'], config_fixed["dql_params"]['hidden_dim_stage1'], config_fixed["dql_params"]['hidden_dim_stage2'], config_fixed["dql_params"]['activation_function'], config_fixed["dql_params"]['add_ll_batch_norm']  ]
+
         config_fixed['num_layers'] = params['num_layers']
         config_fixed['hidden_dim_stage1'] = params['hidden_dim_stage1']
         config_fixed['hidden_dim_stage2'] = params['hidden_dim_stage2']
         config_fixed['activation_function'] = params['activation_function']
-
+        config_fixed['add_ll_batch_norm'] = params['add_ll_batch_norm']
 
     # Clone the updated config for DQlearning and surr_opt
     params_DQL_u = copy.deepcopy(params)
@@ -2650,11 +2702,21 @@ def main():
     # param_grid = {}
 
     param_grid = {
-        'activation_function': ['elu'], # elu, relu, sigmoid, tanh, leakyrelu, none
+        'activation_function': ['relu'], # elu, relu, sigmoid, tanh, leakyrelu, none
         'num_layers': [4], # 2,4
-        'optimizer_lr': [0.07], # 0.1, 0.01, 0.07, 0.001
-        # 'n_epoch':[60]
+        'optimizer_lr': [0.07], #[0.07], # 0.1, 0.01, 0.07, 0.001
+        'add_ll_batch_norm': [True],
+        'n_epoch':[90], # 90,150
     }
+
+
+    # param_grid = {
+    #     'activation_function': ['elu'], # elu, relu, sigmoid, tanh, leakyrelu, none
+    #     'num_layers': [4], # 2,4
+    #     'optimizer_lr': [0.07], #[0.07], # 0.1, 0.01, 0.07, 0.001
+    #     'add_ll_batch_norm': [True],
+    #     'n_epoch':[90], # 90,150
+    # }
 
 
     # param_grid = {
